@@ -1,0 +1,64 @@
+name: Pages Build & Deploy (with wait)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v1
+        with:
+          path: ./public
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v1
+
+      - name: Wait for Pages build to finish (poll)
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const timeoutMinutes = 30;   // adjust if needed
+            const intervalSec = 15;
+            const maxAttempts = Math.ceil(timeoutMinutes * 60 / intervalSec);
+
+            for (let i = 0; i < maxAttempts; i++) {
+              const { data: builds } = await github.rest.repos.listPagesBuilds({ owner, repo });
+              const latest = builds?.[0];
+              const status = latest?.status ?? 'unknown';
+              console.log(`Attempt ${i+1}/${maxAttempts} — pages build status: ${status}`);
+
+              if (latest && (status === 'built' || status === 'succeeded')) {
+                console.log('Pages site built and published.');
+                return;
+              }
+
+              if (latest && (status === 'errored' || status === 'failed')) {
+                throw new Error(`Pages build failed: ${JSON.stringify(latest)}`);
+              }
+
+              await new Promise(resolve => setTimeout(resolve, intervalSec * 1000));
+            }
+
+            throw new Error(`Timeout waiting ${timeoutMinutes} minutes for Pages build.`);
