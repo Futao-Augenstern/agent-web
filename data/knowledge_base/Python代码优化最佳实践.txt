@@ -1,0 +1,71 @@
+Python 代码优化最佳实践
+
+一、命名规范
+1. 变量和函数使用 snake_case（小写加下划线）
+2. 类名使用 PascalCase（大驼峰）
+3. 常量使用 UPPER_SNAKE_CASE
+4. 私有属性和方法以单下划线开头
+5. 命名要有意义，避免单字母变量（循环变量除外）
+
+二、函数设计
+1. 函数职责单一，一个函数只做一件事
+2. 函数参数不宜过多（建议不超过 5 个）
+3. 使用默认参数减少调用复杂度
+4. 适当使用 *args 和 **kwargs 增加灵活性
+5. 添加 docstring 说明函数用途、参数和返回值
+
+三、代码结构
+1. 合理使用空行分隔逻辑块
+2. 避免过深的嵌套（不超过 3-4 层）
+3. 提前返回（early return）减少嵌套
+4. 提取重复代码为公共函数
+5. 按功能模块组织代码文件
+
+四、性能优化
+1. 使用列表推导式代替 for 循环
+2. 避免在循环中进行重复计算
+3. 使用生成器（generator）节省内存
+4. 合理使用缓存（如 lru_cache）
+5. 使用 with 语句管理资源
+
+五、错误处理
+1. 使用 try-except 捕获具体异常
+2. 不要使用裸 except（except:）
+3. 合理使用 finally 清理资源
+4. 自定义异常类提高可读性
+5. 记录详细的错误日志
+
+六、常见优化示例
+
+优化前：
+```python
+def get_total(items):
+    total = 0
+    for item in items:
+        if item.get('price'):
+            total = total + item['price'] * item.get('count', 1)
+    return total
+```
+
+优化后：
+```python
+def calculate_total(items):
+    """计算商品总价。
+    
+    Args:
+        items: 商品列表，每项包含 price 和可选的 count 字段
+        
+    Returns:
+        float: 商品总价
+    """
+    return sum(
+        item['price'] * item.get('count', 1)
+        for item in items
+        if 'price' in item
+    )
+```
+
+七、参考资源
+- PEP 8 官方风格指南
+- Python 性能分析工具：cProfile, line_profiler
+- 代码质量检查：flake8, pylint, mypy
