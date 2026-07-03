@@ -688,226 +688,103 @@
             </div>
         </div>
     </div>
-
     <script>
+    /* ============================================================
+     *  AI 智能体前端逻辑
+     *  模块划分：配置 / 状态 / 工具函数 / 渲染 / API / 交互
+     * ============================================================ */
+    (function () {
+        'use strict';
+
+        // ── 常量配置 ────────────────────────────────────────────────
         const PROV_MAP = {
-            'agnes': { url: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash' },
-            'deepseek': { url: 'https://api.deepseek.com', model: 'deepseek-chat' },
-            'qwen': { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
-            'glm': { url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4' },
-            'moonshot': { url: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
-            'openai': { url: 'https://api.openai.com/v1', model: 'gpt-4o' },
-            'ollama': { url: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+            agnes:    { url: 'https://apihub.agnes-ai.com/v1',            model: 'agnes-2.0-flash' },
+            deepseek: { url: 'https://api.deepseek.com',                  model: 'deepseek-chat' },
+            qwen:     { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+            glm:      { url: 'https://open.bigmodel.cn/api/paas/v4',      model: 'glm-4' },
+            moonshot: { url: 'https://api.moonshot.cn/v1',                model: 'moonshot-v1-8k' },
+            openai:   { url: 'https://api.openai.com/v1',                 model: 'gpt-4o' },
+            ollama:   { url: 'http://localhost:11434/v1',                 model: 'qwen2.5:7b' },
+            zeroone:  { url: 'https://api.lingyiwanwu.com/v1',            model: 'yi-lightning' },
         };
 
         const MODE_INFO = {
-            'weekly': { title: '写周报助手', desc: '输入关键词，自动生成完整周报', icon: '📝' },
-            'learn': { title: '学知识助手', desc: '输入主题，搜索资料并整理成学习笔记', icon: '📚' },
-            'code': { title: '改代码助手', desc: '粘贴代码，分析问题并给出优化方案', icon: '💻' },
+            weekly: { title: '写周报助手', desc: '输入关键词，自动生成完整周报', icon: '📝' },
+            learn:  { title: '学知识助手', desc: '输入主题，搜索资料并整理成学习笔记', icon: '📚' },
+            code:   { title: '改代码助手', desc: '粘贴代码，分析问题并给出优化方案', icon: '💻' },
         };
 
-        let currentMode = 'weekly';
-        let currentChatId = null;
-        let messages = [];
-        let chatList = [];
-        let isStreaming = false;
+        const STORAGE_KEYS = {
+            provider: 'agent_provider',
+            apiKey:   'agent_api_key',
+            dark:     'agent_dark',
+            theme:    'agent_theme',
+            chatList: 'agent_chat_list',
+        };
 
-        function $(id) { return document.getElementById(id); }
+        const FILE_LANG_MAP = {
+            py: 'python', js: 'javascript', ts: 'typescript', java: 'java',
+            go: 'go', rs: 'rust', c: 'c', cpp: 'cpp', h: 'c',
+            html: 'html', css: 'css', json: 'json', sql: 'sql',
+            sh: 'bash', bat: 'bash', md: 'markdown', txt: 'text',
+        };
 
-        function saveConfig() {
-            try {
-                localStorage.setItem('agent_provider', $('provider').value);
-                localStorage.setItem('agent_api_key', $('apiKey').value);
-            } catch (e) {}
+        // ── 应用状态 ────────────────────────────────────────────────
+        const state = {
+            currentMode: 'weekly',
+            currentChatId: null,
+            messages: [],
+            chatList: [],
+            isStreaming: false,
+        };
+
+        // ── 工具函数 ────────────────────────────────────────────────
+        const $ = id => document.getElementById(id);
+
+        /** 防抖：最后一次调用后 delay ms 执行 */
+        function debounce(fn, delay) {
+            let t = null;
+            return function (...args) {
+                clearTimeout(t);
+                t = setTimeout(() => fn.apply(this, args), delay);
+            };
         }
 
-        function loadConfig() {
-            try {
-                const prov = localStorage.getItem('agent_provider');
-                const key = localStorage.getItem('agent_api_key');
-                const theme = localStorage.getItem('agent_theme');
-                const dark = localStorage.getItem('agent_dark');
-                if (prov) $('provider').value = prov;
-                if (key) $('apiKey').value = key;
-                if (theme) setTheme(theme);
-                if (dark === '1') document.body.classList.add('dark');
-            } catch (e) {}
+        /** 安全转义 HTML */
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
-        function setTheme(theme) {
-            document.body.classList.remove('theme-purple', 'theme-green', 'theme-orange');
-            if (theme !== 'blue') document.body.classList.add('theme-' + theme);
-            document.querySelectorAll('.theme-dot').forEach(d => {
-                d.classList.toggle('active', d.dataset.theme === theme);
-            });
-            try { localStorage.setItem('agent_theme', theme); } catch (e) {}
-        }
+        /** 本地存储读写（带 try/catch 防隐私模式报错） */
+        const storage = {
+            get(key, def = '') {
+                try { return localStorage.getItem(key) || def; }
+                catch (_) { return def; }
+            },
+            set(key, val) {
+                try { localStorage.setItem(key, val); }
+                catch (_) { /* 忽略 */ }
+            },
+            remove(key) {
+                try { localStorage.removeItem(key); }
+                catch (_) { /* 忽略 */ }
+            },
+        };
 
-        function setMode(mode) {
-            currentMode = mode;
-            document.querySelectorAll('.mode-tab').forEach(tab => {
-                tab.classList.toggle('on', tab.dataset.mode === mode);
-            });
-            const info = MODE_INFO[mode];
-            $('modeTitle').textContent = info.title;
-            $('modeDesc').textContent = info.desc;
-            $('welcomeIcon').textContent = info.icon;
-            loadTemplates();
-            if (!currentChatId) renderWelcome();
-        }
-
-        function loadTemplates() {
-            fetch('/templates')
-                .then(r => r.json())
-                .then(data => {
-                    const templates = data.templates[currentMode] || [];
-                    const list = $('templateList');
-                    if (list) {
-                        list.innerHTML = templates.map(t => 
-                            `<span class="template-chip" data-text="${t}">${t}</span>`
-                        ).join('');
-                        list.querySelectorAll('.template-chip').forEach(chip => {
-                            chip.addEventListener('click', () => {
-                                $('messageInput').value = chip.dataset.text;
-                                $('messageInput').focus();
-                            });
-                        });
-                    }
-                })
-                .catch(() => {});
-        }
-
-        function loadChatList() {
-            fetch('/chats')
-                .then(r => r.json())
-                .then(data => {
-                    chatList = data.chats || [];
-                    renderChatList();
-                })
-                .catch(() => {});
-        }
-
-        function renderChatList() {
-            const list = $('chatList');
-            if (!chatList.length) {
-                list.innerHTML = '<div style="text-align:center;color:var(--t2);font-size:12px;padding:20px">暂无历史对话</div>';
-                return;
-            }
-            list.innerHTML = chatList.map(chat => `
-                <div class="chat-item ${chat.id === currentChatId ? 'on' : ''}" data-id="${chat.id}">
-                    <span class="title">${escapeHtml(chat.title)}</span>
-                    <span class="del" data-del="${chat.id}">×</span>
-                </div>
-            `).join('');
-            
-            list.querySelectorAll('.chat-item').forEach(item => {
-                item.addEventListener('click', (e) => {
-                    if (e.target.dataset.del) {
-                        e.stopPropagation();
-                        deleteChat(e.target.dataset.del);
-                    } else {
-                        openChat(item.dataset.id);
-                    }
-                });
-            });
-        }
-
-        function newChat() {
-            currentChatId = null;
-            messages = [];
-            renderWelcome();
-            loadChatList();
-        }
-
-        function openChat(chatId) {
-            fetch('/chat/' + chatId)
-                .then(r => r.json())
-                .then(data => {
-                    if (data && !data.error) {
-                        currentChatId = chatId;
-                        messages = data.messages || [];
-                        if (data.mode) setMode(data.mode);
-                        renderMessages();
-                        loadChatList();
-                    }
-                })
-                .catch(() => {});
-        }
-
-        function deleteChat(chatId) {
-            if (!confirm('确定要删除这个对话吗？')) return;
-            fetch('/chat/' + chatId, { method: 'DELETE' })
-                .then(r => r.json())
-                .then(() => {
-                    if (currentChatId === chatId) {
-                        currentChatId = null;
-                        messages = [];
-                        renderWelcome();
-                    }
-                    loadChatList();
-                })
-                .catch(() => {});
-        }
-
-        function renderWelcome() {
-            const chatArea = $('chatArea');
-            const info = MODE_INFO[currentMode];
-            chatArea.innerHTML = `
-                <div class="welcome">
-                    <div class="icon">${info.icon}</div>
-                    <h2>${info.title}</h2>
-                    <p>${info.desc}</p>
-                    <div class="templates" id="templateList"></div>
-                </div>
-            `;
-            loadTemplates();
-        }
-
-        function renderMessages() {
-            const chatArea = $('chatArea');
-            if (!messages.length) {
-                renderWelcome();
-                return;
-            }
-
-            let html = '';
-            messages.forEach((msg, idx) => {
-                const isUser = msg.role === 'user';
-                html += `
-                    <div class="bubble ${isUser ? 'user' : 'assistant'}">
-                        <div class="role">${isUser ? '你' : '助手'}</div>
-                        <div class="content">${formatMarkdown(msg.content || '')}</div>
-                        ${!isUser ? `
-                            <div class="bubble-actions">
-                                <button onclick="copyMessage(${idx})">📋 复制</button>
-                                <button onclick="regenerateMessage()">🔄 重新生成</button>
-                            </div>
-                        ` : ''}
-                    </div>
-                `;
-            });
-            chatArea.innerHTML = html;
-            chatArea.scrollTop = chatArea.scrollHeight;
-            
-            document.querySelectorAll('pre code').forEach(block => {
-                if (typeof hljs !== 'undefined') hljs.highlightElement(block);
-            });
-            
-            document.querySelectorAll('pre').forEach((pre, i) => {
-                const btn = document.createElement('button');
-                btn.className = 'copy-btn';
-                btn.textContent = '复制';
-                btn.onclick = () => {
-                    const code = pre.querySelector('code');
-                    if (code) {
-                        navigator.clipboard.writeText(code.innerText);
-                        btn.textContent = '已复制';
-                        setTimeout(() => btn.textContent = '复制', 1500);
-                    }
-                };
-                pre.appendChild(btn);
-            });
-        }
+        // ── Markdown 渲染 ───────────────────────────────────────────
+        const mdRules = [
+            [/^### (.*$)/gim, '<h3>$1</h3>'],
+            [/^## (.*$)/gim,  '<h2>$1</h2>'],
+            [/^# (.*$)/gim,   '<h1>$1</h1>'],
+            [/\*\*(.*?)\*\*/g, '<strong>$1</strong>'],
+            [/\*(.*?)\*/g,     '<em>$1</em>'],
+            [/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>'],
+            [/`([^`]+)`/g,    '<code>$1</code>'],
+            [/^- (.*$)/gim,   '<li>$1</li>'],
+            [/^(\d+)\. (.*$)/gim, '<li>$1. $2</li>'],
+        ];
 
         function formatMarkdown(text) {
             if (!text) return '';
@@ -915,45 +792,304 @@
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
-            
-            html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
-            html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
-            html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
-            
-            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
-            
-            html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>');
-            html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-            
-            html = html.replace(/^- (.*$)/gim, '<li>$1</li>');
-            html = html.replace(/^(\d+)\. (.*$)/gim, '<li>$1. $2</li>');
-            
-            html = html.replace(/(<li>[\s\S]*?<\/li>)/g, function(match) {
+
+            for (const [pattern, replacement] of mdRules) {
+                html = html.replace(pattern, replacement);
+            }
+
+            // 列表包裹
+            html = html.replace(/(<li>[\s\S]*?<\/li>)/g, function (match) {
                 if (!match.includes('<ul>') && !match.includes('<ol>')) {
                     return '<ul>' + match + '</ul>';
                 }
                 return match;
             });
-            
             html = html.replace(/<\/ul>\s*<ul>/g, '');
-            
             html = html.replace(/\n/g, '<br>');
-            
+
             return html;
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+        /** 给代码块加复制按钮 */
+        function addCopyButtons(container) {
+            if (!container) return;
+            container.querySelectorAll('pre').forEach(pre => {
+                if (pre.querySelector('.copy-btn')) return; // 防止重复
+                const btn = document.createElement('button');
+                btn.className = 'copy-btn';
+                btn.textContent = '复制';
+                btn.addEventListener('click', () => {
+                    const code = pre.querySelector('code');
+                    if (!code) return;
+                    navigator.clipboard.writeText(code.innerText).then(() => {
+                        btn.textContent = '已复制';
+                        setTimeout(() => { btn.textContent = '复制'; }, 1500);
+                    });
+                });
+                pre.appendChild(btn);
+            });
         }
 
+        /** 高亮代码块（节流：避免流式渲染时频繁调用） */
+        const highlightBlocks = debounce(function (container) {
+            if (typeof hljs === 'undefined' || !container) return;
+            container.querySelectorAll('pre code').forEach(block => {
+                if (block.dataset.highlighted) return;
+                try {
+                    hljs.highlightElement(block);
+                    block.dataset.highlighted = '1';
+                } catch (_) { /* 忽略 */ }
+            });
+        }, 300);
+
+        // ── API 封装 ────────────────────────────────────────────────
+        const api = {
+            async chatStream(payload, onContent, onDone, onError) {
+                try {
+                    const resp = await fetch('/chat/stream', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+
+                    const reader = resp.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+
+                        for (const line of lines) {
+                            if (!line.startsWith('data: ')) continue;
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.error) { onError(data.error); return; }
+                                if (data.done)  { onDone(); return; }
+                                if (data.content) { onContent(data.content); }
+                            } catch (_) { /* 忽略解析失败 */ }
+                        }
+                    }
+                } catch (err) {
+                    onError(err.message);
+                }
+            },
+
+            async getKb() {
+                const r = await fetch('/kb');
+                return r.json();
+            },
+
+            async uploadKb(title, content) {
+                const r = await fetch('/kb/upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content }),
+                });
+                return r.json();
+            },
+
+            async exportChat(messages, format) {
+                const r = await fetch('/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages, format }),
+                });
+                return r.json();
+            },
+        };
+
+        // ── 渲染层 ──────────────────────────────────────────────────
+        function renderMessages() {
+            const chatArea = $('chatArea');
+
+            if (state.messages.length === 0) {
+                const info = MODE_INFO[state.currentMode];
+                const templates = getTemplates(state.currentMode);
+                chatArea.innerHTML = `
+                    <div class="welcome">
+                        <div class="icon">${info.icon}</div>
+                        <h2>${info.title}</h2>
+                        <p>${info.desc}</p>
+                        <div class="templates">
+                            ${templates.map(t => `<span class="template-chip" data-tpl="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+                // 模板点击
+                chatArea.querySelectorAll('.template-chip').forEach(chip => {
+                    chip.addEventListener('click', () => {
+                        $('messageInput').value = chip.dataset.tpl;
+                        $('messageInput').focus();
+                        autoResizeInput();
+                    });
+                });
+                return;
+            }
+
+            chatArea.innerHTML = state.messages.map((msg, i) => {
+                const role = msg.role === 'user' ? '我' : '助手';
+                const contentHtml = msg.role === 'user'
+                    ? escapeHtml(msg.content)
+                    : formatMarkdown(msg.content);
+                const actions = msg.role === 'assistant'
+                    ? `<div class="bubble-actions">
+                         <button onclick="copyMessage(${i})">📋 复制</button>
+                         <button onclick="regenerateMessage()">🔄 重新生成</button>
+                       </div>`
+                    : '';
+                return `
+                    <div class="bubble ${msg.role}">
+                        <div class="role">${role}</div>
+                        <div class="content">${contentHtml}</div>
+                        ${actions}
+                    </div>
+                `;
+            }).join('');
+
+            addCopyButtons(chatArea);
+            highlightBlocks(chatArea);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        function renderChatList() {
+            const list = $('chatList');
+            if (state.chatList.length === 0) {
+                list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t2);font-size:12px">暂无对话</div>';
+                return;
+            }
+            list.innerHTML = state.chatList.map(chat => `
+                <div class="chat-item ${chat.id === state.currentChatId ? 'on' : ''}" data-id="${chat.id}">
+                    <span class="title">${escapeHtml(chat.title)}</span>
+                    <span class="del" data-del="${chat.id}">×</span>
+                </div>
+            `).join('');
+
+            list.querySelectorAll('.chat-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    if (e.target.dataset.del) {
+                        e.stopPropagation();
+                        deleteChat(e.target.dataset.del);
+                        return;
+                    }
+                    openChat(item.dataset.id);
+                });
+            });
+        }
+
+        function setMode(mode) {
+            state.currentMode = mode;
+            document.querySelectorAll('.mode-tab').forEach(t => {
+                t.classList.toggle('on', t.dataset.mode === mode);
+            });
+            const info = MODE_INFO[mode];
+            document.querySelector('.header .title').textContent = info.title;
+            // 切换模式新建对话
+            newChat();
+        }
+
+        function getTemplates(mode) {
+            const map = {
+                weekly: ['本周完成了用户管理模块开发', '参加了3次产品评审会议', '优化了首页加载性能'],
+                learn:  ['请介绍一下 React Hooks', '帮我学习 Python 装饰器', '什么是向量数据库'],
+                code:   ['优化这段 Python 代码', '帮我找 bug', '重构这个函数'],
+            };
+            return map[mode] || [];
+        }
+
+        // ── 对话管理 ────────────────────────────────────────────────
+        function newChat() {
+            state.currentChatId = null;
+            state.messages = [];
+            renderMessages();
+            renderChatList();
+        }
+
+        function openChat(chatId) {
+            const saved = storage.get(STORAGE_KEYS.chatList, '[]');
+            try {
+                const list = JSON.parse(saved);
+                const chat = list.find(c => c.id === chatId);
+                if (chat) {
+                    state.currentChatId = chatId;
+                    state.messages = chat.messages || [];
+                    if (chat.mode) state.currentMode = chat.mode;
+                    renderMessages();
+                    renderChatList();
+                }
+            } catch (_) { /* 忽略 */ }
+        }
+
+        function saveCurrentChat() {
+            if (!state.currentChatId || state.messages.length === 0) return;
+
+            let list = [];
+            try {
+                list = JSON.parse(storage.get(STORAGE_KEYS.chatList, '[]'));
+            } catch (_) { list = []; }
+
+            const title = state.messages[0]?.content?.slice(0, 30) || '新对话';
+            const idx = list.findIndex(c => c.id === state.currentChatId);
+            const chatData = {
+                id: state.currentChatId,
+                title,
+                messages: state.messages,
+                mode: state.currentMode,
+                time: Date.now(),
+            };
+
+            if (idx >= 0) {
+                list[idx] = chatData;
+            } else {
+                list.unshift(chatData);
+            }
+
+            // 最多保存 50 条
+            if (list.length > 50) list = list.slice(0, 50);
+            storage.set(STORAGE_KEYS.chatList, JSON.stringify(list));
+            state.chatList = list;
+        }
+
+        function deleteChat(chatId) {
+            if (!confirm('确定删除这个对话吗？')) return;
+            let list = [];
+            try {
+                list = JSON.parse(storage.get(STORAGE_KEYS.chatList, '[]'));
+            } catch (_) { list = []; }
+            list = list.filter(c => c.id !== chatId);
+            storage.set(STORAGE_KEYS.chatList, JSON.stringify(list));
+            state.chatList = list;
+
+            if (state.currentChatId === chatId) {
+                newChat();
+            } else {
+                renderChatList();
+            }
+        }
+
+        function loadChatList() {
+            try {
+                state.chatList = JSON.parse(storage.get(STORAGE_KEYS.chatList, '[]'));
+            } catch (_) {
+                state.chatList = [];
+            }
+            renderChatList();
+        }
+
+        // ── 发送消息 ────────────────────────────────────────────────
         async function sendMessage() {
             const input = $('messageInput');
             const text = input.value.trim();
-            if (!text || isStreaming) return;
-            
+            if (!text || state.isStreaming) return;
+
             const apiKey = $('apiKey').value.trim();
             if (!apiKey) {
                 alert('请先填写 API Key');
@@ -962,172 +1098,147 @@
 
             const provider = $('provider').value;
             const config = PROV_MAP[provider];
-            
-            if (!currentChatId) {
-                currentChatId = Date.now().toString();
+
+            if (!state.currentChatId) {
+                state.currentChatId = Date.now().toString();
             }
-            
+
             input.value = '';
-            messages.push({ role: 'user', content: text });
+            autoResizeInput();
+            state.messages.push({ role: 'user', content: text });
             renderMessages();
-            isStreaming = true;
+            saveCurrentChat();
+
+            state.isStreaming = true;
             $('sendBtn').disabled = true;
 
+            // 创建流式消息气泡
             const chatArea = $('chatArea');
             const bubbleDiv = document.createElement('div');
             bubbleDiv.className = 'bubble assistant';
-            bubbleDiv.innerHTML = '<div class="role">助手</div><div class="content" id="streamContent"></div>';
+            bubbleDiv.innerHTML = `
+                <div class="role">助手</div>
+                <div class="content"><div class="typing"><span></span><span></span><span></span></div></div>
+            `;
             chatArea.appendChild(bubbleDiv);
             chatArea.scrollTop = chatArea.scrollHeight;
-            
-            const streamContent = $('streamContent');
+
+            const contentEl = bubbleDiv.querySelector('.content');
             let fullText = '';
 
-            try {
-                const response = await fetch('/chat/stream', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        mode: currentMode,
-                        message: text,
-                        api_key: apiKey,
-                        base_url: config.url,
-                        model: config.model,
-                        chat_id: currentChatId,
-                        history: messages.slice(0, -1),
-                    }),
-                });
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.slice(6));
-                                if (data.error) {
-                                    streamContent.innerHTML = '❌ 错误：' + escapeHtml(data.error);
-                                    isStreaming = false;
-                                    $('sendBtn').disabled = false;
-                                    return;
-                                }
-                                if (data.done) {
-                                    messages.push({ role: 'assistant', content: fullText });
-                                    renderMessages();
-                                    loadChatList();
-                                    isStreaming = false;
-                                    $('sendBtn').disabled = false;
-                                    return;
-                                }
-                                if (data.content) {
-                                    fullText += data.content;
-                                    streamContent.innerHTML = formatMarkdown(fullText);
-                                    chatArea.scrollTop = chatArea.scrollHeight;
-                                    
-                                    if (typeof hljs !== 'undefined') {
-                                        streamContent.querySelectorAll('pre code').forEach(block => {
-                                            hljs.highlightElement(block);
-                                        });
-                                    }
-                                }
-                            } catch (e) {}
-                        }
-                    }
+            api.chatStream(
+                {
+                    mode: state.currentMode,
+                    message: text,
+                    api_key: apiKey,
+                    base_url: config.url,
+                    model: config.model,
+                    chat_id: state.currentChatId,
+                    history: state.messages.slice(0, -1),
+                },
+                // onContent
+                function (chunk) {
+                    fullText += chunk;
+                    contentEl.innerHTML = formatMarkdown(fullText);
+                    addCopyButtons(bubbleDiv);
+                    highlightBlocks(bubbleDiv);
+                    chatArea.scrollTop = chatArea.scrollHeight;
+                },
+                // onDone
+                function () {
+                    state.messages.push({ role: 'assistant', content: fullText });
+                    saveCurrentChat();
+                    renderMessages();
+                    loadChatList();
+                    finishStreaming();
+                },
+                // onError
+                function (errMsg) {
+                    contentEl.innerHTML = '❌ 错误：' + escapeHtml(errMsg);
+                    finishStreaming();
                 }
-            } catch (error) {
-                streamContent.innerHTML = '❌ 请求失败：' + escapeHtml(error.message);
-                isStreaming = false;
-                $('sendBtn').disabled = false;
-            }
+            );
         }
 
-        function copyMessage(idx) {
-            const msg = messages[idx];
+        function finishStreaming() {
+            state.isStreaming = false;
+            $('sendBtn').disabled = false;
+        }
+
+        // ── 消息操作 ────────────────────────────────────────────────
+        window.copyMessage = function (idx) {
+            const msg = state.messages[idx];
             if (msg) {
-                navigator.clipboard.writeText(msg.content || '');
-                alert('已复制到剪贴板');
+                navigator.clipboard.writeText(msg.content || '').then(() => {
+                    alert('已复制到剪贴板');
+                });
             }
-        }
+        };
 
-        function regenerateMessage() {
-            const lastUserIdx = messages.length - 2;
-            if (lastUserIdx < 0 || messages[lastUserIdx].role !== 'user') return;
-            const userMsg = messages[lastUserIdx].content;
-            messages = messages.slice(0, lastUserIdx);
+        window.regenerateMessage = function () {
+            const lastUserIdx = state.messages.length - 2;
+            if (lastUserIdx < 0 || state.messages[lastUserIdx].role !== 'user') return;
+            const userMsg = state.messages[lastUserIdx].content;
+            state.messages = state.messages.slice(0, lastUserIdx);
+            saveCurrentChat();
             renderMessages();
             setTimeout(() => {
                 $('messageInput').value = userMsg;
                 sendMessage();
             }, 100);
-        }
+        };
 
+        // ── 导出 ────────────────────────────────────────────────────
         function exportChat() {
             openModal('exportModal');
         }
 
         function confirmExport() {
             const format = $('exportFormat').value;
-            fetch('/export', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messages, format }),
-            })
-            .then(r => r.json())
-            .then(data => {
+            api.exportChat(state.messages, format).then(data => {
                 if (data.content) {
                     const blob = new Blob([data.content], { type: 'text/plain;charset=utf-8' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `对话记录_${new Date().toISOString().slice(0,10)}.${format === 'markdown' ? 'md' : 'txt'}`;
+                    const ext = format === 'markdown' ? 'md' : 'txt';
+                    a.download = '对话记录_' + new Date().toISOString().slice(0, 10) + '.' + ext;
                     a.click();
                     URL.revokeObjectURL(url);
                     closeModal('exportModal');
                 }
-            })
-            .catch(() => alert('导出失败'));
+            }).catch(() => alert('导出失败'));
         }
 
+        // ── 知识库 ──────────────────────────────────────────────────
         function openKbModal() {
             openModal('kbModal');
             loadKbDocs();
         }
 
         function loadKbDocs() {
-            fetch('/kb')
-                .then(r => r.json())
-                .then(data => {
-                    $('kbCount').textContent = `${data.count || 0} 条文档`;
-                    const list = $('kbDocList');
-                    if (data.docs && data.docs.length) {
-                        list.innerHTML = '<div style="font-size:12px;color:var(--t2);margin-bottom:6px">已有文档：</div>' +
-                            data.docs.map(d => `<div style="padding:6px 10px;background:var(--bg);border-radius:4px;font-size:12px;margin-bottom:4px">${escapeHtml(d.title)}</div>`).join('');
-                    }
-                })
-                .catch(() => {});
+            api.getKb().then(data => {
+                $('kbCount').textContent = (data.count || 0) + ' 条文档';
+                const list = $('kbDocList');
+                if (data.docs && data.docs.length) {
+                    list.innerHTML = '<div style="font-size:12px;color:var(--t2);margin-bottom:6px">已有文档：</div>' +
+                        data.docs.map(d =>
+                            '<div style="padding:6px 10px;background:var(--bg);border-radius:4px;font-size:12px;margin-bottom:4px">' + escapeHtml(d.title) + '</div>'
+                        ).join('');
+                } else {
+                    list.innerHTML = '<div style="font-size:12px;color:var(--t2)">暂无文档</div>';
+                }
+            }).catch(() => {
+                $('kbCount').textContent = '知识库离线';
+            });
         }
 
         function saveKb() {
             const title = $('kbTitle').value.trim();
             const content = $('kbContent').value.trim();
             if (!content) { alert('请输入文档内容'); return; }
-            
-            fetch('/kb/upload', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title, content }),
-            })
-            .then(r => r.json())
-            .then(data => {
+
+            api.uploadKb(title, content).then(data => {
                 if (data.ok) {
                     alert('添加成功！');
                     $('kbTitle').value = '';
@@ -1136,10 +1247,10 @@
                 } else {
                     alert('添加失败：' + (data.error || '未知错误'));
                 }
-            })
-            .catch(() => alert('添加失败'));
+            }).catch(() => alert('添加失败'));
         }
 
+        // ── 模态框 ──────────────────────────────────────────────────
         function openModal(id) {
             $(id).classList.add('show');
         }
@@ -1148,6 +1259,7 @@
             $(id).classList.remove('show');
         }
 
+        // ── 代码插入 ────────────────────────────────────────────────
         function insertCode() {
             openModal('codeModal');
         }
@@ -1156,93 +1268,157 @@
             const lang = $('codeLang').value;
             const code = $('codeContent').value;
             if (!code) { closeModal('codeModal'); return; }
-            
-            const input = $('messageInput');
-            const codeBlock = `\`\`\`${lang}\n${code}\n\`\`\`\n`;
-            const start = input.selectionStart;
-            const end = input.selectionEnd;
-            input.value = input.value.slice(0, start) + codeBlock + input.value.slice(end);
-            input.focus();
-            input.selectionStart = input.selectionEnd = start + codeBlock.length;
+            insertCodeBlock('```' + lang + '\n' + code + '\n```\n');
             closeModal('codeModal');
         }
 
-        function toggleDark() {
-            document.body.classList.toggle('dark');
-            try {
-                localStorage.setItem('agent_dark', document.body.classList.contains('dark') ? '1' : '');
-            } catch (e) {}
+        function insertCodeBlock(block) {
+            const input = $('messageInput');
+            const start = input.selectionStart;
+            const end = input.selectionEnd;
+            input.value = input.value.slice(0, start) + block + input.value.slice(end);
+            input.focus();
+            input.selectionStart = input.selectionEnd = start + block.length;
+            autoResizeInput();
         }
 
-        $('provider').addEventListener('change', saveConfig);
-        $('apiKey').addEventListener('input', saveConfig);
-        
-        document.querySelectorAll('.mode-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                setMode(tab.dataset.mode);
+        // ── 主题 & 深色模式 ─────────────────────────────────────────
+        function toggleDark() {
+            document.body.classList.toggle('dark');
+            storage.set(STORAGE_KEYS.dark, document.body.classList.contains('dark') ? '1' : '');
+        }
+
+        function setTheme(theme) {
+            document.body.classList.remove('theme-purple', 'theme-green', 'theme-orange');
+            if (theme && theme !== 'blue') {
+                document.body.classList.add('theme-' + theme);
+            }
+            document.querySelectorAll('.theme-dot').forEach(d => {
+                d.classList.toggle('active', d.dataset.theme === theme);
             });
-        });
+            storage.set(STORAGE_KEYS.theme, theme);
+        }
 
-        $('sendBtn').addEventListener('click', sendMessage);
-        $('newChatBtn').addEventListener('click', newChat);
-        $('exportBtn').addEventListener('click', exportChat);
-        $('kbBtn').addEventListener('click', openKbModal);
-        $('kbSaveBtn').addEventListener('click', saveKb);
-        $('confirmExportBtn').addEventListener('click', confirmExport);
-        $('settingsBtn').addEventListener('click', () => openModal('settingsModal'));
-        $('insertCodeBtn').addEventListener('click', insertCode);
-        $('insertCodeConfirm').addEventListener('click', confirmInsertCode);
-        $('toggleDarkBtn').addEventListener('click', toggleDark);
-        $('themeBtn').addEventListener('click', toggleDark);
-        $('kbCount').addEventListener('click', openKbModal);
+        // ── 配置持久化 ──────────────────────────────────────────────
+        function saveConfig() {
+            storage.set(STORAGE_KEYS.provider, $('provider').value);
+            storage.set(STORAGE_KEYS.apiKey, $('apiKey').value.trim());
+        }
 
-        $('uploadFileBtn').addEventListener('click', () => $('fileInput').click());
-        $('fileInput').addEventListener('change', function() {
-            const file = this.files[0];
+        function loadConfig() {
+            const provider = storage.get(STORAGE_KEYS.provider, 'deepseek');
+            const apiKey = storage.get(STORAGE_KEYS.apiKey, '');
+            $('provider').value = provider;
+            $('apiKey').value = apiKey;
+
+            if (storage.get(STORAGE_KEYS.dark, '') === '1') {
+                document.body.classList.add('dark');
+            }
+
+            const theme = storage.get(STORAGE_KEYS.theme, 'blue');
+            setTheme(theme);
+        }
+
+        // ── 文件上传 ────────────────────────────────────────────────
+        function handleFileUpload(file) {
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = function(e) {
+            reader.onload = function (e) {
                 const content = e.target.result;
                 const ext = file.name.split('.').pop().toLowerCase();
-                const langMap = {py:'python',js:'javascript',ts:'typescript',java:'java',go:'go',rs:'rust',c:'c',cpp:'cpp',h:'c',html:'html',css:'css',json:'json',sql:'sql',sh:'bash',bat:'bash'};
-                const lang = langMap[ext] || 'text';
-                const input = $('messageInput');
-                const codeBlock = `\`\`\`${lang}\n${content}\n\`\`\`\n`;
-                const start = input.selectionStart;
-                input.value = input.value.slice(0, start) + codeBlock + input.value.slice(input.selectionEnd);
-                input.focus();
-                input.selectionStart = input.selectionEnd = start + codeBlock.length;
+                const lang = FILE_LANG_MAP[ext] || 'text';
+                insertCodeBlock('```' + lang + '\n' + content + '\n```\n');
             };
             reader.readAsText(file);
-            this.value = '';
-        });
+        }
 
-        document.querySelectorAll('.theme-dot').forEach(dot => {
-            dot.addEventListener('click', () => setTheme(dot.dataset.theme));
-        });
+        // ── 输入框自适应高度 ────────────────────────────────────────
+        function autoResizeInput() {
+            const input = $('messageInput');
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        }
 
-        $('messageInput').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
+        // ── 事件绑定 ────────────────────────────────────────────────
+        function bindEvents() {
+            // 配置
+            $('provider').addEventListener('change', saveConfig);
+            $('apiKey').addEventListener('input', debounce(saveConfig, 300));
 
-        $('messageInput').addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 200) + 'px';
-        });
-
-        document.querySelectorAll('.modal-overlay').forEach(overlay => {
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay) overlay.classList.remove('show');
+            // 模式切换
+            document.querySelectorAll('.mode-tab').forEach(tab => {
+                tab.addEventListener('click', () => setMode(tab.dataset.mode));
             });
-        });
 
-        loadConfig();
-        loadChatList();
-        loadTemplates();
-        loadKbDocs();
+            // 发送
+            $('sendBtn').addEventListener('click', sendMessage);
+            $('newChatBtn').addEventListener('click', newChat);
+            $('exportBtn').addEventListener('click', exportChat);
+            $('kbBtn').addEventListener('click', openKbModal);
+            $('kbSaveBtn').addEventListener('click', saveKb);
+            $('confirmExportBtn').addEventListener('click', confirmExport);
+            $('settingsBtn').addEventListener('click', () => openModal('settingsModal'));
+            $('insertCodeBtn').addEventListener('click', insertCode);
+            $('insertCodeConfirm').addEventListener('click', confirmInsertCode);
+            $('toggleDarkBtn').addEventListener('click', toggleDark);
+            $('themeBtn').addEventListener('click', toggleDark);
+            $('kbCount').addEventListener('click', openKbModal);
+
+            // 文件上传
+            $('uploadFileBtn').addEventListener('click', () => $('fileInput').click());
+            $('fileInput').addEventListener('change', function () {
+                handleFileUpload(this.files[0]);
+                this.value = '';
+            });
+
+            // 主题色
+            document.querySelectorAll('.theme-dot').forEach(dot => {
+                dot.addEventListener('click', () => setTheme(dot.dataset.theme));
+            });
+
+            // 输入框
+            $('messageInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            $('messageInput').addEventListener('input', autoResizeInput);
+
+            // 模态框点击外部关闭
+            document.querySelectorAll('.modal-overlay').forEach(overlay => {
+                overlay.addEventListener('click', (e) => {
+                    if (e.target === overlay) overlay.classList.remove('show');
+                });
+            });
+
+            // ESC 关闭所有模态框
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    document.querySelectorAll('.modal-overlay.show').forEach(m => {
+                        m.classList.remove('show');
+                    });
+                }
+            });
+        }
+
+        // ── 初始化 ──────────────────────────────────────────────────
+        function init() {
+            loadConfig();
+            loadChatList();
+            renderMessages();
+            bindEvents();
+            loadKbDocs();
+        }
+
+        // 启动
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+
+    })();
     </script>
 </body>
 </html>
